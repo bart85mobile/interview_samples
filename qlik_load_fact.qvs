@@ -1,0 +1,209 @@
+Sub _common_fact_overview(_vSelectOption, _vStartDate, _vEndDate)
+//------------------------------------------------------------------------------------------------------------------------//
+// Start - Introduce Introduce Variables
+Let vSelectOption = '$(_vSelectOption)';
+Let vStartDate = MonthStart('$(_vStartDate)');
+Let vEndDate = MonthEnd('$(_vEndDate)');
+
+Let vSourceConnection = 'dwh (boomings)';
+Let vSourceFileColumn = 
+    'site_id,
+    game_id,
+    player_id,
+    country_id,
+    currency_id,
+    sessions_date_id,
+    rounds_date_id,
+    is_cash AS "Is Cash", 
+    is_demo AS "Is Demo",
+    new_active_players AS "New Active Players",
+    active_players AS "Active Players",
+    bounce_players AS "Bounce Players",
+    played_sessions AS "Played Sessions",
+    bounce_sessions AS "Bounce Sessions",
+    sessions_duration AS "Sessions Duration",
+    rounds AS "Rounds Local",
+    credits AS "Credits Local",
+    debits AS "Debits Local",
+    bets AS "Bets Local",
+    wins AS "Wins Local",
+    ggr AS "GGR Local",
+    credits_eur AS "Credits",
+    debits_eur AS "Debits",
+    bets_eur AS "Bets",
+    wins_eur AS "Wins",
+    ggr_eur AS "GGR",
+    setup AS "Setup",
+    source AS "Source"';
+Let vSourceFileSchema = '_common';
+Let vSourceFileTable = 'fact_overview';
+Let vDestinationConnection = 'prod_envs (boomings)';
+
+Let vExecutionDay = Date(Today(),'YYYY-MM-DD');
+Let vExecutionDay_Minus5Days = Date(Today()-5,'YYYY-MM-DD');
+Let vExecutionDay_MonthStart = Date(MonthStart('$(vExecutionDay)'),'YYYY-MM-DD');
+// End - Introduce Introduce Variables
+//------------------------------------------------------------------------------------------------------------------------//
+//------------------------------------------------------------------------------------------------------------------------//
+// Start - Establish Time Frames for a Partition
+If '$(vExecutionDay_MonthStart)' < '$(vExecutionDay_Minus5Days)' Then
+    Let vMinDate = '$(vExecutionDay_MonthStart)';
+    Let vMaxDate = '$(vExecutionDay)';
+Else
+    Let vMinDate = Date(MonthStart('$(vExecutionDay_Minus5Days)'),'YYYY-MM-DD');
+    Let vMaxDate = '$(vExecutionDay)';
+EndIf;
+// End - Establish Time Frames for a Partition
+//------------------------------------------------------------------------------------------------------------------------//
+//------------------------------------------------------------------------------------------------------------------------//
+// Start - Set Dynamic Time Frame
+If '$(vSelectOption)' = 'a' Then
+    Let vMinStartDate = Num('$(vMinDate)');
+    Let vMaxEndDate = Num('$(vMaxDate)');
+Else
+    Let vMinStartDate = Num('$(vStartDate)');
+    Let vMaxEndDate = Num('$(vEndDate)');
+EndIf;
+// End - Set Dynamic Time Frame
+//------------------------------------------------------------------------------------------------------------------------//
+//------------------------------------------------------------------------------------------------------------------------//
+// Start - Partition Start and End
+DateField:
+LOAD Date($(vMinStartDate)+IterNo()-1) AS DateField
+AUTOGENERATE (1)
+WHILE $(vMinStartDate)+IterNo()-1 <= $(vMaxEndDate);
+
+Partition_Dates:
+LOAD DISTINCT
+    MonthStart(DateField) AS PartitionStart,
+    MonthEnd(DateField) AS PartitionEnd
+Resident DateField;
+
+DROP TABLE DateField;
+// End - Partition Start and End
+//------------------------------------------------------------------------------------------------------------------------//
+//------------------------------------------------------------------------------------------------------------------------//
+// Start - MAIN BODY
+//------------------------------------------------------------------------------------------------------------------------//
+//------------------------------------------------------------------------------------------------------------------------//
+// Start - Loop for Daily Partitions
+Let NumRows=NoOfRows('Partition_Dates');
+
+For a = 1 to $(NumRows)
+
+    Let vConcatenate = '';
+    Set ErrorMode = 0;
+    Let vMinStartDate = Year(Peek('PartitionStart', $(a)-1, 'Partition_Dates'))
+    	& Num(Month(Peek('PartitionStart', $(a)-1, 'Partition_Dates')),'00')
+        & Num(Day(Peek('PartitionStart', $(a)-1, 'Partition_Dates')),'00');
+    Let vMaxEndDate = Year(Peek('PartitionEnd', $(a)-1, 'Partition_Dates'))
+    	& Num(Month(Peek('PartitionEnd', $(a)-1, 'Partition_Dates')),'00')
+        & Num(Day(Peek('PartitionEnd', $(a)-1, 'Partition_Dates')),'00'); 
+
+    For b = $(vMinStartDate) to $(vMaxEndDate)
+
+        Let vDay = Num(Right('$(b)',2));
+        Let vMonth = Num(Right(Left('$(b)',6),2));
+        Let vPostgresDate = '$(b)';
+        Let vPostgresPartitionFileName = '$(vSourceFileTable)_$(vPostgresDate)';
+        Let vQVDYearMonth = Num(Left('$(b)',6));
+        Let vQVDPartitionFileName = '$(vSourceFileSchema)_$(vSourceFileTable)_$(vQVDYearMonth)';
+        //----------------------------------------------------------------------------------------------------------------//
+        // Start - Insert Data to QVD File
+        If ScriptError > 0 then
+
+            //------------------------------------------------------------------------------------------------------------//
+            // Start - Insert Next Partition Data to QVD File
+            Let i = '$(b)' + 1;
+            Let vPostgresPartitionLaterFileName = '$(vSourceFileTable)_$(i).qvd';
+
+            Do while i <= '$(b)'
+
+                LIB CONNECT TO [$(vSourceConnection)];
+
+                Temp_Fact:
+                $(vConcatenate)
+                SELECT $(vSourceFileColumn)
+                FROM $(vSourceFileSchema).$(vPostgresPartitionLaterFileName);
+
+                Let vConcatenate = 'Concatenate';
+                Let i = i + 1;
+
+            Loop
+            // End - Insert Next Partition Data to QVD File
+            //------------------------------------------------------------------------------------------------------------//
+
+        Elseif ScriptError = 0 then
+
+            //------------------------------------------------------------------------------------------------------------//
+            // Start - Insert Current Partition Data to QVD File
+            LIB CONNECT TO [$(vSourceConnection)];
+
+            Temp_Fact:
+            $(vConcatenate)
+            SELECT $(vSourceFileColumn)
+            FROM $(vSourceFileSchema).$(vPostgresPartitionFileName);
+
+            Let vConcatenate = 'Concatenate';
+            // End - Insert Current Partition Data to QVD File
+            //------------------------------------------------------------------------------------------------------------//
+
+        End If;
+        // End - Insert Data to QVD File
+        //----------------------------------------------------------------------------------------------------------------//
+
+    Next b;
+
+    Store
+        site_id, game_id, player_id, country_id, currency_id, sessions_date_id, rounds_date_id,
+        [Is Cash], [Is Demo], [New Active Players], [Active Players], [Bounce Players], [Played Sessions],
+        [Bounce Sessions], [Sessions Duration], [Rounds Local], [Credits Local], [Debits Local], [Bets Local],
+        [Wins Local], [GGR Local], [Credits], [Debits], [Bets], [Wins], [GGR], [Setup], [Source]
+    From Temp_Fact into 'Lib://$(vDestinationConnection)/qvd/$(vQVDPartitionFileName).qvd';
+    Drop Table Temp_Fact;
+
+    Set ErrorMode = 1;
+
+Next a;
+
+DROP TABLE Partition_Dates;
+// End - Loop for Daily Partitions
+//------------------------------------------------------------------------------------------------------------------------//
+//------------------------------------------------------------------------------------------------------------------------//
+// End - MAIN BODY
+//------------------------------------------------------------------------------------------------------------------------//
+//------------------------------------------------------------------------------------------------------------------------//
+// Start - Null All Variables
+Let _vSelectOption = Null();
+Let _vStartDate = Null();
+Let _vEndDate = Null();
+Let vSelectOption = Null();
+Let vStartDate = Null();
+Let vEndDate = Null();
+Let vSourceConnection = Null();
+Let vSourceFileColumn = Null();
+Let vSourceFileSchema = Null();
+Let vSourceFileTable = Null();
+Let vDestinationConnection = Null();
+Let vExecutionDay = Null();
+Let vExecutionDay_Minus5Days = Null();
+Let vExecutionDay_MonthStart = Null();
+Let vMinDate = Null();
+Let vMaxDate = Null();
+Let vMinStartDate = Null();
+Let vMaxEndDate = Null();
+Let NumRows = Null();
+Let a = Null();
+Let vConcatenate = Null();
+Let b = Null();
+Let vDay = Null();
+Let vMonth = Null();
+Let vPostgresDate = Null();
+Let vPostgresPartitionFileName = Null();
+Let vQVDYearMonth = Null();
+Let vQVDPartitionFileName = Null();
+Let i = Null();
+Let vPostgresPartitionLaterFileName = Null();
+// End - Null All Variables
+//------------------------------------------------------------------------------------------------------------------------//
+End Sub
